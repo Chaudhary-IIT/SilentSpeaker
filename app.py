@@ -1,26 +1,20 @@
-from flask import Flask, render_template, request
-import os
+from flask import Flask
+from application.database import db
+from application.controllers import controllers
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app=None
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+def create_app():
+    app = Flask(__name__)
+    app.register_blueprint(controllers)
+    app.config['UPLOAD_FOLDER'] = 'static/uploads'
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///silent_speaker.db'
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db.init_app(app)
+    return app
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    if 'video' not in request.files:
-        return "No video uploaded", 400
 
-    file = request.files['video']
-    path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-    file.save(path)
-
-    # TODO: Replace this with your AI model call
-    output_text = "Model output: (Predicted text from lip movements)"
-
-    return render_template('index.html', result=output_text)
+app = create_app()
 
 if __name__ == "__main__":
     app.run(debug=True)

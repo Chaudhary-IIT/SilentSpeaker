@@ -22,8 +22,7 @@ It bridges the communication gap for people with **hearing or speech impairments
 
 | Layer | Technology |
 |--------|-------------|
-| **Frontend** | HTML, CSS, JavaScript, Bootstrap 5 |
-| **Backend** | Flask (Python) |
+| **Framework** |Streamlit|
 | **AI/ML** | PyTorch / TensorFlow (lip-reading model) |
 | **Video Processing** | OpenCV, Mediapipe |
 | **Speech Synthesis** | gTTS |

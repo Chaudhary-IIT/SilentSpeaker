@@ -83,13 +83,13 @@ pip install -r requirements.txt
 
 ### 4️⃣ Run the app
 ```bash
-python app.py
+streamlit run app.py
 ```
 
 
 ### 5️⃣ Open in browser
 ```bash
-http://127.0.0.1:5000
+http://localhost:8501/
 ```
 
 ---

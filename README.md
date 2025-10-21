@@ -4,6 +4,14 @@
 
 It operates on both uploaded videos and live webcam streams through a clean, interactive **Streamlit** interface.
 
+## 🚀 Live Demo
+
+You can access the live, hosted version of the application here:
+
+👉 **[https://silentspeaker.streamlit.app/](https://silentspeaker.streamlit.app/)**
+
+---
+
 ## 🚀 Highlights
 
 * **Visual Speech Recognition (VSR):** Uses a **CTC-based** model to decode character sequences directly from mouth-region video frames, operating completely **without audio**.
@@ -44,7 +52,7 @@ SilentSpeaker/
 ├─ models/
 │  └─ checkpoints/               # Place lip_reader.pt here
 ├─ scripts/
-│  ├─ build_manifest_grid_v3.py  # Pair videos with alignments → CSV manifest
+│  ├─ build_manifest.py          # Pair videos with alignments → CSV manifest
 │  ├─ dataset_vsr.py             # ROI dataset + collate for CTC
 │  ├─ model_vsr.py               # CNN3D + BiGRU model
 │  ├─ train_vsr.py               # CTC training loop (CPU or CUDA auto)
@@ -55,6 +63,9 @@ SilentSpeaker/
 │  ├─ history.db                 # SQLite history
 │  └─ history.csv                # CSV backup log
 ├─ requirements.txt
+├─ packages.txt
+├─ HelpBook.txt
+├─ .gitignore
 └─ README.md
 ```
 ---

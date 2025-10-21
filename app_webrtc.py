@@ -43,3 +43,4 @@ webrtc_streamer(
     video_processor_factory=LandmarkProcessor,
     media_stream_constraints=MEDIA_CONSTRAINTS,
 )
+

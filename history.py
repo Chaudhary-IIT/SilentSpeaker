@@ -1,5 +1,8 @@
 # history.py
 import sqlite3, os, csv, time
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
 
 DB_PATH = "static/history.db"
 CSV_PATH = "static/history.csv"
@@ -32,10 +35,22 @@ def save_history_sqlite(source, src_lang, text_en, text_trans, tgt_lang):
     con.commit()
     con.close()
 
-def save_history_csv(source, src_lang, text_en, text_trans, tgt_lang):
-    new_file = not os.path.exists(CSV_PATH)
-    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new_file:
-            w.writerow(["ts","source","src_lang","text_en","text_trans","tgt_lang"])
-        w.writerow([int(time.time()), source, src_lang, text_en, text_trans, tgt_lang])
+
+def save_history_csv(source_type, source_lang, original_text, translated_text, target_lang, audio_path=""):
+    Path("static").mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data = {
+        'source_type': [source_type],
+        'source_lang': [source_lang],
+        'original_text': [original_text],
+        'translated_text': [translated_text],
+        'target_lang': [target_lang],
+        'audio_path': [audio_path],
+        'timestamp': [timestamp]
+    }
+    df = pd.DataFrame(data)
+    csv_path = 'static/history.csv'
+    if not Path(csv_path).exists():
+        df.to_csv(csv_path, mode='w', index=False, header=True)
+    else:
+        df.to_csv(csv_path, mode='a', index=False, header=False)

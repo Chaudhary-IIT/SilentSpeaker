@@ -240,11 +240,27 @@ with tab_webcam:
             self.buffer = []
             return frames
 
+    from streamlit_webrtc import webrtc_streamer, RTCConfiguration
+
+    RTC_CFG = RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"]},
+            {
+                "urls": ["turn:your.turn.server:3478", "turns:your.turn.server:5349"],
+                "username": "user",
+                "credential": "pass"
+            }
+        ]
+    })
+
     ctx = webrtc_streamer(
         key="webcam-lips",
         video_processor_factory=LandmarkProcessor,
-        media_stream_constraints=MEDIA,
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration=RTC_CFG,
     )
+
+
 
     if "was_playing" not in st.session_state:
         st.session_state.was_playing = False

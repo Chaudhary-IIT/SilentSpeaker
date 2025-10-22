@@ -1,4 +1,4 @@
-# SilentSpeaker: Visual Speech Recognition Web App
+# SilentSpeaker: AI-Powered Lip Reading and Speech Generation Assistant.
 
 **SilentSpeaker** is an AI web application that translates lip movements into text and optional speech. It's designed for **assistive communication** and **silent interaction** in environments where microphones are unusable, such as noisy public spaces or private settings.
 

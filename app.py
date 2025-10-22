@@ -1,30 +1,35 @@
 # app.py
 # Run: streamlit run app.py
 
-import os, uuid, pathlib, time, csv, sys
+import os, uuid, pathlib, time, csv
 import sqlite3
+import torch
 import streamlit as st
 import av, cv2
 from gtts import gTTS
-from streamlit_webrtc import webrtc_streamer
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import mediapipe as mp
 
 # Your trained model wrapper must exist in models.py and return {"text": str, "conf": float}
 from models import LipReaderModel
 
 # -----------------------------
-# Paths and setup
+# Page setup
 # -----------------------------
 st.set_page_config(page_title="SilentSpeaker", page_icon="🎙️", layout="centered")
 st.title("🎙️ SilentSpeaker")
 st.markdown("##### Read lips. Generate text. Give voice to silence.")
 
+# -----------------------------
+# Paths and folders
+# -----------------------------
 BASE = pathlib.Path(__file__).parent.resolve()
 STATIC_DIR = BASE / "static"
 UPLOAD_DIR = STATIC_DIR / "uploads"
 AUDIO_DIR = STATIC_DIR / "audio"
 DB_PATH = STATIC_DIR / "history.db"
 CSV_PATH = STATIC_DIR / "history.csv"
+
 for p in [STATIC_DIR, UPLOAD_DIR, AUDIO_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -116,25 +121,38 @@ init_db()
 migrate_history_schema()
 
 # -----------------------------
-# Cache model
+# Cache model (load your checkpoint here)
 # -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_model():
-    return LipReaderModel()
+    # Change this to an absolute path if you store the file elsewhere
+    ckpt = str(BASE / "models" / "checkpoints" / "lip_reader.pt")
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    # Prefer passing checkpoint and device; fall back to default constructor if wrapper signature differs
+    try:
+        return LipReaderModel(checkpoint_path=ckpt, device=dev)
+    except TypeError:
+        return LipReaderModel()
 
 model = get_model()
 
 # -----------------------------
-# Sidebar: DB and controls
+# Sidebar: DB, model, and controls
 # -----------------------------
 with st.sidebar:
-    st.caption("Database location")
+    st.caption("Database")
     st.code(str(DB_PATH))
     try:
         ts = os.path.getmtime(DB_PATH)
         st.caption(f"Last modified: {time.ctime(ts)}")
     except Exception:
         st.caption("DB not found")
+
+    st.caption("Model status")
+    ckpt_path_default = BASE / "models" / "checkpoints" / "lip_reader.pt"
+    st.code(f"Checkpoint: {ckpt_path_default.name} → {'found' if ckpt_path_default.exists() else 'missing'}")
+    st.caption(f"Device → {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+
     colA, colB = st.columns(2)
     with colA:
         if st.button("Reload model"):
@@ -161,7 +179,7 @@ tab_upload, tab_webcam, tab_history = st.tabs(["Upload", "Webcam", "History"])
 # Upload tab
 # -----------------------------
 with tab_upload:
-    uploaded_video = st.file_uploader("Upload a video of a person speaking", type=["mp4","mov","avi"])
+    uploaded_video = st.file_uploader("Upload a video of a person speaking", type=["mp4","mov","avi","mpg","mkv"])
     tgt_lang = st.selectbox("TTS language", ["hi","en","bn","ta","te"], index=0)
 
     if uploaded_video is not None:
@@ -179,13 +197,13 @@ with tab_upload:
 
         st.success("✅ Prediction Complete!")
         st.subheader("📝 Predicted Text")
-        st.write(text_en)
+        st.write(text_en or "")
         st.caption(f"Confidence: {conf:.3f}")
 
         with st.spinner("🌐 Translating..."):
             text_out = translate_text(text_en, target_lang=tgt_lang)
         st.subheader("🌐 Translated")
-        st.write(text_out)
+        st.write(text_out or "")
 
         with st.spinner("🔊 Generating speech..."):
             audio_path = AUDIO_DIR / f"{uuid.uuid4().hex}.mp3"
@@ -240,15 +258,14 @@ with tab_webcam:
             self.buffer = []
             return frames
 
-    from streamlit_webrtc import webrtc_streamer, RTCConfiguration
-
+    # Explicit ICE servers for hosted deployments (replace TURN with real credentials or env vars)
     RTC_CFG = RTCConfiguration({
         "iceServers": [
             {"urls": ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"]},
             {
                 "urls": ["turn:your.turn.server:3478", "turns:your.turn.server:5349"],
-                "username": "user",
-                "credential": "pass"
+                "username": os.environ.get("TURN_USERNAME", "user"),
+                "credential": os.environ.get("TURN_CREDENTIAL", "pass")
             }
         ]
     })
@@ -256,11 +273,9 @@ with tab_webcam:
     ctx = webrtc_streamer(
         key="webcam-lips",
         video_processor_factory=LandmarkProcessor,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints=MEDIA,
         rtc_configuration=RTC_CFG,
     )
-
-
 
     if "was_playing" not in st.session_state:
         st.session_state.was_playing = False
@@ -282,12 +297,14 @@ with tab_webcam:
         text_en = res.get("text", "")
         conf = float(res.get("conf", 0.0))
         text_out = translate_text(text_en, target_lang=tgt_lang_cam)
+
         audio_path = AUDIO_DIR / f"{uuid.uuid4().hex}.mp3"
         try:
             gTTS(text_out or " ", lang=tgt_lang_cam).save(str(audio_path))
         except Exception as e:
             st.error(f"TTS failed: {e}")
             audio_path = ""
+
         ok = save_history_row_safe("webcam", "en", text_en, text_out, tgt_lang_cam, str(audio_path), str(temp_path))
         if ok:
             show_latest_row()
@@ -353,4 +370,4 @@ with tab_history:
     except Exception as e:
         st.warning(f"Could not read history: {e}")
 
-st.caption("Tip: After editing this file, restart Streamlit to reload the new UI and clear caches if needed (from the app menu).")
+st.caption("Tip: After editing this file, restart Streamlit or use the sidebar Reload model to clear caches.")

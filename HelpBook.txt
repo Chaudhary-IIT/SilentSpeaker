@@ -1,7 +1,7 @@
 # Create virtual environment
 
 python -m venv venv
-venv\Scripts\activate (Windows)
+.\venv\Scripts\activate (Windows)
 source venv/bin/activate (Mac)
 
 ---------------------------------------------------------------------------------------------------------------------
@@ -17,6 +17,10 @@ pip freeze > requirements.txt
 pip install -r requirements.txt
 ---------------------------------------------------------------------------------------------------------------------
 
-# Run the flask app
+# Run the streamlit app
 
-python app.py
+streamlit run app.py
+
+----------------------------------------------------------------------------------------------------------------------
+
+

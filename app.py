@@ -125,10 +125,8 @@ migrate_history_schema()
 # -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_model():
-    # Change this to an absolute path if you store the file elsewhere
     ckpt = str(BASE / "models" / "checkpoints" / "lip_reader.pt")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    # Prefer passing checkpoint and device; fall back to default constructor if wrapper signature differs
     try:
         return LipReaderModel(checkpoint_path=ckpt, device=dev)
     except TypeError:
@@ -183,7 +181,6 @@ with tab_upload:
     tgt_lang = st.selectbox("TTS language", ["hi","en","bn","ta","te"], index=0)
 
     if uploaded_video is not None:
-        # Persist upload
         video_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{uploaded_video.name}"
         with open(video_path, "wb") as f:
             f.write(uploaded_video.getbuffer())
@@ -191,7 +188,7 @@ with tab_upload:
         st.video(str(video_path))
 
         with st.spinner("🔍 Predicting text from lips..."):
-            result = model.predict(str(video_path))  # expects {"text": str, "conf": float}
+            result = model.predict(str(video_path))
         text_en = result.get("text", "")
         conf = float(result.get("conf", 0.0))
 
@@ -235,6 +232,51 @@ with tab_webcam:
             self.mp_draw = mp.solutions.drawing_utils
             self.mp_styles = mp.solutions.drawing_styles
             self.buffer = []
+            self.last_roi = None      # latest grayscale ROI (uint8)
+            self.prev_bbox = None
+            self.smooth_alpha = 0.6
+            self.lip_idx = list(range(61, 88))
+
+        def _face_bbox_from_landmarks(self, lms, w, h, pad_rel=0.08):
+            xs = [int(lm.x * w) for lm in lms.landmark]
+            ys = [int(lm.y * h) for lm in lms.landmark]
+            x1, y1 = max(min(xs), 0), max(min(ys), 0)
+            x2, y2 = min(max(xs), w), min(max(ys), h)
+            padx = int((x2 - x1) * pad_rel)
+            pady = int((y2 - y1) * pad_rel)
+            return [max(0, x1 - padx), max(0, y1 - pady), min(w, x2 + padx), min(h, y2 + pady)]
+
+        def _mouth_center_square(self, lms, w, h, scale=1.0):
+            xs = [(lms.landmark[i].x * w) for i in self.lip_idx]
+            ys = [(lms.landmark[i].y * h) for i in self.lip_idx]
+            if len(xs) == 0:
+                fb = self._face_bbox_from_landmarks(lms, w, h)
+                fw = fb[2] - fb[0]
+                cx = fb[0] + fw // 2
+                cy = fb[1] + (fb[3] - fb[1]) // 2
+                size = int(fw * 0.35)
+                half = size // 2
+                return [max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half)]
+            cx = int(sum(xs) / len(xs)); cy = int(sum(ys) / len(ys))
+            lip_w = max(1.0, (max(xs) - min(xs)))
+            face_bbox = self._face_bbox_from_landmarks(lms, w, h)
+            face_w = float(face_bbox[2] - face_bbox[0])
+            size = int(max(lip_w * 2.6, face_w * 0.28))
+            size = int(size * float(scale))
+            half = max(8, size // 2)
+            x1, y1, x2, y2 = cx - half, cy - half, cx + half, cy + half
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            return [x1, y1, x2, y2]
+
+        def _smooth_bbox(self, bbox):
+            if self.prev_bbox is None:
+                self.prev_bbox = bbox
+                return bbox
+            a = float(self.smooth_alpha)
+            sm = [int(round(a * bbox[i] + (1 - a) * self.prev_bbox[i])) for i in range(4)]
+            self.prev_bbox = sm
+            return sm
 
         def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
             img = frame.to_ndarray(format="bgr24")
@@ -242,12 +284,29 @@ with tab_webcam:
             res = self.face_mesh.process(rgb)
             if res.multi_face_landmarks:
                 for face_landmarks in res.multi_face_landmarks:
+                    # draw face mesh
                     self.mp_draw.draw_landmarks(
                         img, face_landmarks,
                         self.mp_face_mesh.FACEMESH_CONTOURS,
                         landmark_drawing_spec=None,
                         connection_drawing_spec=self.mp_styles.get_default_face_mesh_contours_style()
                     )
+                    # compute and store last_roi
+                    x1, y1, x2, y2 = self._mouth_center_square(face_landmarks, img.shape[1], img.shape[0], scale=1.0)
+                    pad_px = max(2, int(min(img.shape[0], img.shape[1]) * 0.03))
+                    x1, y1 = max(0, x1 - pad_px), max(0, y1 - pad_px)
+                    x2, y2 = min(img.shape[1], x2 + pad_px), min(img.shape[0], y2 + pad_px)
+                    x1, y1, x2, y2 = self._smooth_bbox([x1, y1, x2, y2])
+                    crop = img[y1:y2, x1:x2]
+                    if crop.size != 0:
+                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        resized = cv2.resize(gray, (96, 96), interpolation=cv2.INTER_AREA)
+                        try:
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                            resized = clahe.apply(resized.astype('uint8'))
+                        except Exception:
+                            resized = resized.astype('uint8')
+                        self.last_roi = resized  # uint8 HxW
             self.buffer.append(img)
             if len(self.buffer) > 120:
                 self.buffer = self.buffer[-120:]
@@ -258,7 +317,10 @@ with tab_webcam:
             self.buffer = []
             return frames
 
-    # Explicit ICE servers for hosted deployments (replace TURN with real credentials or env vars)
+        def get_last_roi(self):
+            return self.last_roi
+
+    # ICE servers (replace TURN with real credentials)
     RTC_CFG = RTCConfiguration({
         "iceServers": [
             {"urls": ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"]},
@@ -281,6 +343,17 @@ with tab_webcam:
         st.session_state.was_playing = False
 
     auto_result_placeholder = st.empty()
+    # ROI preview placeholders
+    roi_col = st.empty()
+    roi_caption = st.empty()
+
+    # continuously update ROI preview while streaming (non-blocking)
+    if ctx and ctx.video_processor:
+        last_roi = ctx.video_processor.get_last_roi()
+        if last_roi is not None:
+            roi_col.image(last_roi, caption="Mouth ROI (live preview)", use_column_width=False)
+        else:
+            roi_col.info("No mouth ROI detected yet. Ensure face is visible and well-lit.")
 
     def flush_and_process(frames):
         if not frames:
@@ -315,6 +388,14 @@ with tab_webcam:
         if st.button("Save Transcript (Webcam)"):
             if ctx and ctx.video_processor:
                 frames = ctx.video_processor.get_buffer_and_clear()
+                # show ROI preview if available
+                last_roi = ctx.video_processor.get_last_roi()
+                if last_roi is not None:
+                    roi_col.image(last_roi, caption="Mouth ROI preview (96×96)", use_column_width=False)
+                    roi_caption.caption("If ROI looks wrong, try moving closer / adjust lighting.")
+                else:
+                    roi_col.empty()
+                    roi_caption.caption("No ROI detected yet.")
                 result = flush_and_process(frames)
                 if result:
                     auto_result_placeholder.success("✅ Saved from webcam")
@@ -325,8 +406,8 @@ with tab_webcam:
                     st.write(result["text_out"])
                     if result["audio"]:
                         st.audio(result["audio"], format="audio/mp3")
-                else:
-                    st.warning("No frames captured. Try again.")
+            else:
+                st.warning("No frames captured. Try again.")
 
     with col2:
         st.write("Stop the stream to auto-save the last few seconds.")

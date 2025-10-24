@@ -49,15 +49,48 @@ class MouthROIVideoDataset(Dataset):
         # MediaPipe lip landmarks
         self.lip_idx = list(range(61, 88))
 
+    # ---- New helpers replacing original _mouth_bbox logic ----
+    def _face_bbox_from_landmarks(self, lms, w, h, pad_rel=0.08):
+        xs = [int(lm.x * w) for lm in lms.landmark]
+        ys = [int(lm.y * h) for lm in lms.landmark]
+        x1, y1 = max(min(xs), 0), max(min(ys), 0)
+        x2, y2 = min(max(xs), w), min(max(ys), h)
+        padx = int((x2 - x1) * pad_rel)
+        pady = int((y2 - y1) * pad_rel)
+        return [max(0, x1 - padx), max(0, y1 - pady), min(w, x2 + padx), min(h, y2 + pady)]
+
+    def _mouth_center_square(self, lms, w, h, scale=1.0):
+        lip_idx = list(range(61, 88))
+        xs = [(lms.landmark[i].x * w) for i in lip_idx]
+        ys = [(lms.landmark[i].y * h) for i in lip_idx]
+        if len(xs) == 0:
+            fb = self._face_bbox_from_landmarks(lms, w, h)
+            fw = fb[2] - fb[0]
+            cx = fb[0] + fw // 2
+            cy = fb[1] + (fb[3] - fb[1]) // 2
+            size = int(fw * 0.35)
+            half = size // 2
+            return [max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half)]
+        cx = int(sum(xs) / len(xs)); cy = int(sum(ys) / len(ys))
+        lip_w = max(1.0, (max(xs) - min(xs)))
+        face_bbox = self._face_bbox_from_landmarks(lms, w, h)
+        face_w = float(face_bbox[2] - face_bbox[0])
+        size = int(max(lip_w * 2.6, face_w * 0.28))
+        size = int(size * float(scale))
+        half = max(8, size // 2)
+        x1, y1, x2, y2 = cx - half, cy - half, cx + half, cy + half
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        return [x1, y1, x2, y2]
+
     def _mouth_bbox(self, lms, w, h):
-        xs, ys = [], []
-        for i in self.lip_idx:
-            lm = lms.landmark[i]
-            xs.append(int(lm.x * w))
-            ys.append(int(lm.y * h))
-        x1, y1 = max(min(xs) - self.pad, 0), max(min(ys) - self.pad, 0)
-        x2, y2 = min(max(xs) + self.pad, w), min(max(ys) + self.pad, h)
+        # upstream compatibility: return tight bbox used in training
+        x1, y1, x2, y2 = self._mouth_center_square(lms, w, h, scale=1.0)
+        pad_px = max(2, int(min(w, h) * 0.03))
+        x1, y1 = max(0, x1 - pad_px), max(0, y1 - pad_px)
+        x2, y2 = min(w, x2 + pad_px), min(h, y2 + pad_px)
         return x1, y1, x2, y2
+    # ----------------------------------------------------------
 
     def _roi_seq(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -102,8 +135,8 @@ class MouthROIVideoDataset(Dataset):
 
     def __getitem__(self, i):
         vp, text = self.items[i]
-        x = self._roi_seq(vp)             # [T, H, W], float32 in [0,1]
-        x = np.expand_dims(x, 1)          # [T, 1, H, W]
+        x = self._roi_seq(vp)              # [T, H, W], float32 in [0,1]
+        x = np.expand_dims(x, 1)           # [T, 1, H, W]
         y = text_to_int(text.lower(), self.char2idx)  # list[int], no blank in labels
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
 

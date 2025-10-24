@@ -1,4 +1,4 @@
-# scripts/build_manifest_grid_v3.py
+# scripts/build_manifest.py
 import csv, re
 from pathlib import Path
 

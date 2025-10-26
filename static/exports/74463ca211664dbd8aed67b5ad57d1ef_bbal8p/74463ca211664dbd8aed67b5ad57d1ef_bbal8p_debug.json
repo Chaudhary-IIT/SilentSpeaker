@@ -1,0 +1,9 @@
+{
+  "total_frames": 75,
+  "detected_frames": 75,
+  "roi_count": 75,
+  "detection_rate": "100.0%",
+  "time_axis_after_fit": 75,
+  "model_input_shape": "(1, 75, 1, 96, 96)",
+  "logits_shape": "(1, 75, 29)"
+}

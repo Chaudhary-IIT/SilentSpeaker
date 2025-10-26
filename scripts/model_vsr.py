@@ -1,12 +1,19 @@
 # scripts/model_vsr.py
+
 import torch
 import torch.nn as nn
 
+from roi_utils import mouth_center_square as canonical_mouth_center_square, _face_bbox_from_landmarks, add_roi_padding
 
 class CNN3D_BiGRU(nn.Module):
     """
-    Preserves the time axis (T). Stride/pool only on H,W.
-    3D CNN -> global average over H,W -> BiGRU over T -> classifier.
+    Visual speech recognition model for lip-reading.
+
+    - Preserves the time axis (T).
+    - Strides/pools only on H,W.
+    - 3D CNN -> global average over H,W -> BiGRU over T -> classifier.
+
+    Expects input [B,T,1,H,W] where T is in [75,90] (consistent with dataset/inference).
     """
 
     def __init__(self, vocab_size: int, in_ch: int = 1, rnn_hidden: int = 256):
@@ -17,11 +24,13 @@ class CNN3D_BiGRU(nn.Module):
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True),
         )
+
         self.conv2 = nn.Sequential(
             nn.Conv3d(32, 64, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1), bias=False),
             nn.BatchNorm3d(64),
             nn.ReLU(inplace=True),
         )
+
         self.conv3 = nn.Sequential(
             nn.Conv3d(64, 128, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1), bias=False),
             nn.BatchNorm3d(128),
@@ -29,7 +38,10 @@ class CNN3D_BiGRU(nn.Module):
         )
 
         self.dropout = nn.Dropout(0.1)
-        self.rnn = nn.GRU(input_size=128, hidden_size=rnn_hidden, num_layers=2, batch_first=True, bidirectional=True)
+        self.rnn = nn.GRU(
+            input_size=128, hidden_size=rnn_hidden,
+            num_layers=2, batch_first=True, bidirectional=True
+        )
         self.classifier = nn.Linear(rnn_hidden * 2, vocab_size)
 
     def _to_c_t_h_w(self, x: torch.Tensor) -> torch.Tensor:
@@ -44,18 +56,17 @@ class CNN3D_BiGRU(nn.Module):
             raise ValueError(f"Unexpected input shape: {tuple(x.shape)}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._to_c_t_h_w(x)       # [B,1,T,H,W]
-
-        x = self.conv1(x)             # [B,32,T,H1,W1]
-        x = self.conv2(x)             # [B,64,T,H2,W2]
-        x = self.conv3(x)             # [B,128,T,H3,W3]
+        x = self._to_c_t_h_w(x)     # [B,1,T,H,W]
+        x = self.conv1(x)           # [B,32,T,H1,W1]
+        x = self.conv2(x)           # [B,64,T,H2,W2]
+        x = self.conv3(x)           # [B,128,T,H3,W3]
         x = self.dropout(x)
 
         # Global average over spatial dims only -> [B,128,T]
         x = x.mean(dim=[3, 4])
+
         # RNN expects [B,T,feat]
         x = x.transpose(1, 2).contiguous()  # [B,T,128]
-
-        x, _ = self.rnn(x)            # [B,T,2*hidden]
-        logits = self.classifier(x)    # [B,T,V]
+        x, _ = self.rnn(x)                  # [B,T,2*hidden]
+        logits = self.classifier(x)         # [B,T,V]
         return logits

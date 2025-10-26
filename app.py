@@ -1,4 +1,4 @@
-# app.py
+# app.py - FULL ENHANCED VERSION
 # Run: streamlit run app.py
 
 import os, uuid, pathlib, time, csv
@@ -10,7 +10,6 @@ from gtts import gTTS
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import mediapipe as mp
 
-# Your trained model wrapper must exist in models.py and return {"text": str, "conf": float}
 from models import LipReaderModel
 
 # -----------------------------
@@ -34,7 +33,7 @@ for p in [STATIC_DIR, UPLOAD_DIR, AUDIO_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
-# Lightweight translation helper
+# Translation helper
 # -----------------------------
 def translate_text(text: str, target_lang: str = "hi") -> str:
     try:
@@ -45,7 +44,7 @@ def translate_text(text: str, target_lang: str = "hi") -> str:
         return text or " "
 
 # -----------------------------
-# SQLite + CSV history helpers
+# Database helpers
 # -----------------------------
 def init_db():
     con = sqlite3.connect(DB_PATH)
@@ -88,7 +87,6 @@ def save_history_row(source, src_lang, text_en, text_trans, tgt_lang, audio_path
     )
     con.commit()
     con.close()
-    # CSV backup
     new_file = not os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -121,7 +119,7 @@ init_db()
 migrate_history_schema()
 
 # -----------------------------
-# Cache model (load your checkpoint here)
+# Cache model
 # -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_model():
@@ -135,7 +133,68 @@ def get_model():
 model = get_model()
 
 # -----------------------------
-# Sidebar: DB, model, and controls
+# Helper: Display confidence with character highlighting
+# -----------------------------
+def display_confidence_detailed(conf: float, text: str = "", char_confidences: list = None):
+    """Enhanced confidence display with character-level visualization"""
+    
+    # Overall confidence bar
+    if conf >= 0.5:
+        st.success(f"🎯 **High Confidence:** {conf:.1%}")
+        st.caption("✅ Prediction is reliable")
+        color = "green"
+    elif conf >= 0.2:
+        st.warning(f"⚠️ **Medium Confidence:** {conf:.1%}")
+        st.caption("⚠️ Prediction may have errors - verify results")
+        color = "orange"
+    else:
+        st.error(f"❌ **Low Confidence:** {conf:.1%}")
+        st.caption("❌ Prediction is unreliable - poor video quality or unclear speech")
+        color = "red"
+    
+    # Character-level confidence visualization
+    if char_confidences and len(char_confidences) > 0:
+        with st.expander("🔍 Character-Level Confidence", expanded=False):
+            st.caption("Characters highlighted by confidence: 🟢 High (>0.7) | 🟡 Medium (0.4-0.7) | 🔴 Low (<0.4)")
+            
+            # Create HTML with colored characters
+            html_chars = []
+            for char, conf_val in char_confidences:
+                if conf_val >= 0.7:
+                    color_code = "#28a745"  # green
+                    emoji = "🟢"
+                elif conf_val >= 0.4:
+                    color_code = "#ffc107"  # yellow
+                    emoji = "🟡"
+                else:
+                    color_code = "#dc3545"  # red
+                    emoji = "🔴"
+                
+                # Handle spaces
+                display_char = "&nbsp;" if char == " " else char
+                html_chars.append(
+                    f'<span style="color: {color_code}; font-weight: bold; font-size: 1.2em;" '
+                    f'title="{char} ({conf_val:.2%})">{display_char}</span>'
+                )
+            
+            st.markdown(" ".join(html_chars), unsafe_allow_html=True)
+            
+            # Confidence distribution
+            st.markdown("##### Confidence Distribution")
+            low = sum(1 for _, c in char_confidences if c < 0.4)
+            med = sum(1 for _, c in char_confidences if 0.4 <= c < 0.7)
+            high = sum(1 for _, c in char_confidences if c >= 0.7)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🔴 Low", f"{low} chars", f"{low/len(char_confidences)*100:.0f}%")
+            with col2:
+                st.metric("🟡 Medium", f"{med} chars", f"{med/len(char_confidences)*100:.0f}%")
+            with col3:
+                st.metric("🟢 High", f"{high} chars", f"{high/len(char_confidences)*100:.0f}%")
+
+# -----------------------------
+# Sidebar with enhanced model status
 # -----------------------------
 with st.sidebar:
     st.caption("Database")
@@ -146,10 +205,21 @@ with st.sidebar:
     except Exception:
         st.caption("DB not found")
 
-    st.caption("Model status")
+    st.caption("Model Status")
     ckpt_path_default = BASE / "models" / "checkpoints" / "lip_reader.pt"
-    st.code(f"Checkpoint: {ckpt_path_default.name} → {'found' if ckpt_path_default.exists() else 'missing'}")
-    st.caption(f"Device → {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    
+    if model.demo_mode:
+        st.error("⚠️ MODEL IN DEMO MODE")
+        if hasattr(model, 'load_error') and model.load_error:
+            st.warning(f"Error: {model.load_error}")
+        st.caption("The model will return placeholder text only")
+    else:
+        st.success("✅ Model loaded successfully")
+    
+    st.code(f"Checkpoint: {ckpt_path_default.name}")
+    st.code(f"Exists: {ckpt_path_default.exists()}")
+    st.code(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    st.code(f"Demo mode: {model.demo_mode}")
 
     colA, colB = st.columns(2)
     with colA:
@@ -173,35 +243,163 @@ with st.sidebar:
 # -----------------------------
 tab_upload, tab_webcam, tab_history = st.tabs(["Upload", "Webcam", "History"])
 
-# -----------------------------
-# Upload tab
-# -----------------------------
+# ========================================
+# UPLOAD TAB
+# ========================================
 with tab_upload:
+    st.markdown("### 📤 Upload Video for Lip Reading")
     uploaded_video = st.file_uploader("Upload a video of a person speaking", type=["mp4","mov","avi","mpg","mkv"])
-    tgt_lang = st.selectbox("TTS language", ["hi","en","bn","ta","te"], index=0)
-
+    
+    col_lang, col_debug = st.columns([2, 1])
+    with col_lang:
+        tgt_lang = st.selectbox("TTS language", ["hi","en","bn","ta","te"], index=0)
+    with col_debug:
+        enable_debug = st.checkbox("🔧 Enable Debug Mode", value=True)
+    
     if uploaded_video is not None:
         video_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{uploaded_video.name}"
         with open(video_path, "wb") as f:
             f.write(uploaded_video.getbuffer())
-
+        
         st.video(str(video_path))
-
+        
         with st.spinner("🔍 Predicting text from lips..."):
-            result = model.predict(str(video_path))
+            if enable_debug:
+                result = model.predict_with_debug(str(video_path))
+            else:
+                result = model.predict(str(video_path))
+                result["roi_frames"] = []
+                result["annotated_frames"] = []
+                result["debug_info"] = {}
+                result["logits_sample"] = []
+        
         text_en = result.get("text", "")
         conf = float(result.get("conf", 0.0))
-
+        roi_frames = result.get("roi_frames", [])
+        annotated_frames = result.get("annotated_frames", [])
+        debug_info = result.get("debug_info", {})
+        logits_sample = result.get("logits_sample", [])
+        char_confidences = result.get("char_confidences", [])
+        
         st.success("✅ Prediction Complete!")
-        st.subheader("📝 Predicted Text")
-        st.write(text_en or "")
-        st.caption(f"Confidence: {conf:.3f}")
+        
+        # Enhanced confidence display with character-level details
+        display_confidence_detailed(conf, text_en, char_confidences)
+        
+        st.subheader("📝 Predicted Text (English)")
+        st.code(text_en or "[No text detected]", language=None)
+        
+        # Debug section
+        # Debug section
+        if enable_debug and (roi_frames or debug_info):
+            with st.expander("🔧 **Debug Information**", expanded=True):  # Changed to expanded=True
+                
+                st.markdown("#### 📊 Processing Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Frames", debug_info.get("total_frames", 0))
+                with col2:
+                    st.metric("Detected Faces", debug_info.get("detected_frames", 0))
+                with col3:
+                    st.metric("ROI Extracted", debug_info.get("roi_count", 0))
+                with col4:
+                    st.metric("Detection Rate", debug_info.get("detection_rate", "N/A"))
+                
+                # ROI Preview (B&W 96x96)
+                if roi_frames:
+                    st.markdown("---")
+                    st.markdown("#### 🔍 ROI Frames Preview (Grayscale 96×96)")
+                    st.caption("These are the preprocessed mouth regions fed to the AI model")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.image(roi_frames[0], caption=f"First (1/{len(roi_frames)})", 
+                                clamp=True, width=150)
+                    with col2:
+                        mid_idx = len(roi_frames) // 2
+                        st.image(roi_frames[mid_idx], caption=f"Middle ({mid_idx}/{len(roi_frames)})",
+                                clamp=True, width=150)
+                    with col3:
+                        st.image(roi_frames[-1], caption=f"Last ({len(roi_frames)}/{len(roi_frames)})",
+                                clamp=True, width=150)
+                    
+                    # Show all frames option
+                    show_all_roi = st.checkbox("📋 Show all ROI frames (may be slow for long videos)")
+                    if show_all_roi:
+                        st.markdown("##### All ROI Frames")
+                        st.caption(f"Showing {len(roi_frames)} frames")
+                        cols = st.columns(6)
+                        for i, roi in enumerate(roi_frames[:60]):  # Limit to 60 for performance
+                            with cols[i % 6]:
+                                st.image(roi, caption=f"#{i+1}", width=100, clamp=True)
+                        if len(roi_frames) > 60:
+                            st.caption(f"⚠️ Showing first 60 of {len(roi_frames)} frames")
+                
+                # Annotated video frames (COLOR with green boxes)
+                if annotated_frames:
+                    st.markdown("---")
+                    st.markdown("#### 📹 Bounding Box Visualization (Color)")
+                    st.caption("Green box shows detected mouth region on original frames")
+                    
+                    # Save annotated video
+                    annotated_video_path = UPLOAD_DIR / f"{video_path.stem}_annotated.mp4"
+                    h, w = annotated_frames[0].shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    out = cv2.VideoWriter(str(annotated_video_path), fourcc, 20.0, (w, h))
+                    for frame in annotated_frames:
+                        out.write(frame)
+                    out.release()
+                    
+                    st.video(str(annotated_video_path))
+                    
+                    # Sample frames
+                    st.markdown("##### Sample Annotated Frames (Color)")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.image(cv2.cvtColor(annotated_frames[0], cv2.COLOR_BGR2RGB),
+                                caption="First", use_column_width=True)
+                    with col2:
+                        mid = len(annotated_frames) // 2
+                        st.image(cv2.cvtColor(annotated_frames[mid], cv2.COLOR_BGR2RGB),
+                                caption="Middle", use_column_width=True)
+                    with col3:
+                        st.image(cv2.cvtColor(annotated_frames[-1], cv2.COLOR_BGR2RGB),
+                                caption="Last", use_column_width=True)
+                    
+                    # Show all annotated frames option
+                    show_all_annotated = st.checkbox("📋 Show all annotated frames")
+                    if show_all_annotated:
+                        st.markdown("##### All Annotated Frames")
+                        st.caption(f"Showing {len(annotated_frames)} frames")
+                        cols = st.columns(4)
+                        for i, frame in enumerate(annotated_frames[:40]):  # Limit to 40
+                            with cols[i % 4]:
+                                st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                                        caption=f"#{i+1}", use_column_width=True)
+                        if len(annotated_frames) > 40:
+                            st.caption(f"⚠️ Showing first 40 of {len(annotated_frames)} frames")
+                else:
+                    st.warning("⚠️ No annotated frames available. Check face detection.")
+                
+                # Model internals
+                st.markdown("---")
+                st.markdown("#### 🧠 Model Internals")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Time axis:** {debug_info.get('time_axis_after_fit', 'N/A')}")
+                    st.write(f"**Input shape:** {debug_info.get('model_input_shape', 'N/A')}")
+                with col2:
+                    st.write(f"**Logits shape:** {debug_info.get('logits_shape', 'N/A')}")
+                    st.write(f"**Vocab size:** {len(model.idx2char)}")
 
+                
+        # Translation & TTS
         with st.spinner("🌐 Translating..."):
             text_out = translate_text(text_en, target_lang=tgt_lang)
-        st.subheader("🌐 Translated")
-        st.write(text_out or "")
-
+        
+        st.subheader("🌐 Translated Text")
+        st.code(text_out or "", language=None)
+        
         with st.spinner("🔊 Generating speech..."):
             audio_path = AUDIO_DIR / f"{uuid.uuid4().hex}.mp3"
             try:
@@ -210,16 +408,23 @@ with tab_upload:
             except Exception as e:
                 st.error(f"TTS failed: {e}")
                 audio_path = ""
-
+        
         if save_history_row_safe("upload", "en", text_en, text_out, tgt_lang, str(audio_path), str(video_path)):
             show_latest_row()
 
-# -----------------------------
-# Webcam tab (streamlit-webrtc)
-# -----------------------------
+# ========================================
+# WEBCAM TAB - ENHANCED
+# ========================================
 with tab_webcam:
-    st.caption("Live camera with lip/face contours and Save Transcript")
-    tgt_lang_cam = st.selectbox("TTS language (webcam)", ["hi","en","bn","ta","te"], index=0, key="tgt_cam")
+    st.markdown("### 📹 Live Webcam Lip Reading")
+    st.caption("Real-time face detection with mouth ROI tracking")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        tgt_lang_cam = st.selectbox("TTS language", ["hi","en","bn","ta","te"], index=0, key="tgt_cam")
+    with col2:
+        show_fps = st.checkbox("📊 Show FPS", value=True)
+    
     MEDIA = {"video": True, "audio": False}
 
     class LandmarkProcessor:
@@ -232,10 +437,14 @@ with tab_webcam:
             self.mp_draw = mp.solutions.drawing_utils
             self.mp_styles = mp.solutions.drawing_styles
             self.buffer = []
-            self.last_roi = None      # latest grayscale ROI (uint8)
+            self.last_roi = None
             self.prev_bbox = None
             self.smooth_alpha = 0.6
             self.lip_idx = list(range(61, 88))
+            self.frame_count = 0
+            self.detection_count = 0
+            self.last_time = time.time()
+            self.fps = 0.0
 
         def _face_bbox_from_landmarks(self, lms, w, h, pad_rel=0.08):
             xs = [int(lm.x * w) for lm in lms.landmark]
@@ -261,7 +470,7 @@ with tab_webcam:
             lip_w = max(1.0, (max(xs) - min(xs)))
             face_bbox = self._face_bbox_from_landmarks(lms, w, h)
             face_w = float(face_bbox[2] - face_bbox[0])
-            size = int(max(lip_w * 2.6, face_w * 0.28))
+            size = int(max(lip_w * 2.8, face_w * 0.38))
             size = int(size * float(scale))
             half = max(8, size // 2)
             x1, y1, x2, y2 = cx - half, cy - half, cx + half, cy + half
@@ -280,23 +489,38 @@ with tab_webcam:
 
         def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
             img = frame.to_ndarray(format="bgr24")
+            self.frame_count += 1
+            
+            # FPS calculation
+            current_time = time.time()
+            if current_time - self.last_time >= 1.0:
+                self.fps = self.frame_count / (current_time - self.last_time)
+                self.frame_count = 0
+                self.last_time = current_time
+            
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             res = self.face_mesh.process(rgb)
+            
             if res.multi_face_landmarks:
+                self.detection_count += 1
                 for face_landmarks in res.multi_face_landmarks:
-                    # draw face mesh
                     self.mp_draw.draw_landmarks(
                         img, face_landmarks,
                         self.mp_face_mesh.FACEMESH_CONTOURS,
                         landmark_drawing_spec=None,
                         connection_drawing_spec=self.mp_styles.get_default_face_mesh_contours_style()
                     )
-                    # compute and store last_roi
                     x1, y1, x2, y2 = self._mouth_center_square(face_landmarks, img.shape[1], img.shape[0], scale=1.0)
                     pad_px = max(2, int(min(img.shape[0], img.shape[1]) * 0.03))
                     x1, y1 = max(0, x1 - pad_px), max(0, y1 - pad_px)
                     x2, y2 = min(img.shape[1], x2 + pad_px), min(img.shape[0], y2 + pad_px)
                     x1, y1, x2, y2 = self._smooth_bbox([x1, y1, x2, y2])
+                    
+                    # Draw ROI box
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(img, f"ROI: {x2-x1}x{y2-y1}", (x1, y1-10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    
                     crop = img[y1:y2, x1:x2]
                     if crop.size != 0:
                         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -306,7 +530,13 @@ with tab_webcam:
                             resized = clahe.apply(resized.astype('uint8'))
                         except Exception:
                             resized = resized.astype('uint8')
-                        self.last_roi = resized  # uint8 HxW
+                        self.last_roi = resized
+            
+            # FPS overlay
+            if show_fps:
+                cv2.putText(img, f"FPS: {self.fps:.1f}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            
             self.buffer.append(img)
             if len(self.buffer) > 120:
                 self.buffer = self.buffer[-120:]
@@ -319,16 +549,19 @@ with tab_webcam:
 
         def get_last_roi(self):
             return self.last_roi
+        
+        def get_debug_info(self):
+            return {
+                "buffer_size": len(self.buffer),
+                "last_roi_available": self.last_roi is not None,
+                "prev_bbox": self.prev_bbox,
+                "detection_count": self.detection_count,
+                "fps": self.fps
+            }
 
-    # ICE servers (replace TURN with real credentials)
     RTC_CFG = RTCConfiguration({
         "iceServers": [
             {"urls": ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"]},
-            {
-                "urls": ["turn:your.turn.server:3478", "turns:your.turn.server:5349"],
-                "username": os.environ.get("TURN_USERNAME", "user"),
-                "credential": os.environ.get("TURN_CREDENTIAL", "pass")
-            }
         ]
     })
 
@@ -343,17 +576,30 @@ with tab_webcam:
         st.session_state.was_playing = False
 
     auto_result_placeholder = st.empty()
-    # ROI preview placeholders
-    roi_col = st.empty()
-    roi_caption = st.empty()
-
-    # continuously update ROI preview while streaming (non-blocking)
+    
+    # Live debug info
     if ctx and ctx.video_processor:
-        last_roi = ctx.video_processor.get_last_roi()
-        if last_roi is not None:
-            roi_col.image(last_roi, caption="Mouth ROI (live preview)", use_column_width=False)
-        else:
-            roi_col.info("No mouth ROI detected yet. Ensure face is visible and well-lit.")
+        st.markdown("---")
+        st.markdown("### 📊 Live Statistics")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        debug_info = ctx.video_processor.get_debug_info()
+        
+        with col1:
+            last_roi = ctx.video_processor.get_last_roi()
+            if last_roi is not None:
+                st.image(last_roi, caption="🔍 Live Mouth ROI (96×96)", width=200)
+            else:
+                st.info("👤 Waiting for face detection...")
+        
+        with col2:
+            st.metric("Buffer Frames", debug_info["buffer_size"], help="Frames stored for processing")
+            st.metric("FPS", f"{debug_info['fps']:.1f}", help="Current frame rate")
+        
+        with col3:
+            st.metric("ROI Status", "✅ Detected" if debug_info["last_roi_available"] else "⏳ Searching")
+            st.metric("Total Detections", debug_info["detection_count"])
 
     def flush_and_process(frames):
         if not frames:
@@ -369,6 +615,7 @@ with tab_webcam:
         res = model.predict(str(temp_path))
         text_en = res.get("text", "")
         conf = float(res.get("conf", 0.0))
+        char_confs = res.get("char_confidences", [])
         text_out = translate_text(text_en, target_lang=tgt_lang_cam)
 
         audio_path = AUDIO_DIR / f"{uuid.uuid4().hex}.mp3"
@@ -381,48 +628,48 @@ with tab_webcam:
         ok = save_history_row_safe("webcam", "en", text_en, text_out, tgt_lang_cam, str(audio_path), str(temp_path))
         if ok:
             show_latest_row()
-        return {"text": text_en, "conf": conf, "text_out": text_out, "audio": str(audio_path), "video": str(temp_path)}
+        return {
+            "text": text_en, 
+            "conf": conf, 
+            "char_confidences": char_confs,
+            "text_out": text_out, 
+            "audio": str(audio_path), 
+            "video": str(temp_path)
+        }
 
+    st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Save Transcript (Webcam)"):
+        if st.button("💾 Save Transcript", use_container_width=True):
             if ctx and ctx.video_processor:
                 frames = ctx.video_processor.get_buffer_and_clear()
-                # show ROI preview if available
-                last_roi = ctx.video_processor.get_last_roi()
-                if last_roi is not None:
-                    roi_col.image(last_roi, caption="Mouth ROI preview (96×96)", use_column_width=False)
-                    roi_caption.caption("If ROI looks wrong, try moving closer / adjust lighting.")
-                else:
-                    roi_col.empty()
-                    roi_caption.caption("No ROI detected yet.")
-                result = flush_and_process(frames)
+                with st.spinner("Processing..."):
+                    result = flush_and_process(frames)
                 if result:
-                    auto_result_placeholder.success("✅ Saved from webcam")
-                    st.subheader("📝 Predicted Text (Webcam)")
+                    auto_result_placeholder.success("✅ Transcript saved!")
+                    st.subheader("📝 Predicted Text")
                     st.write(result["text"])
-                    st.caption(f"Confidence: {result['conf']:.3f}")
-                    st.subheader("🌐 Translated (Webcam)")
+                    display_confidence_detailed(result["conf"], result["text"], result["char_confidences"])
+                    st.subheader("🌐 Translated")
                     st.write(result["text_out"])
                     if result["audio"]:
                         st.audio(result["audio"], format="audio/mp3")
             else:
-                st.warning("No frames captured. Try again.")
+                st.warning("No frames captured. Start the stream first.")
 
     with col2:
-        st.write("Stop the stream to auto-save the last few seconds.")
-        playing = ctx.state.playing if ctx else False
-        if st.session_state.was_playing and not playing:
+        if st.button("🎬 Capture Single Frame", use_container_width=True):
             if ctx and ctx.video_processor:
-                frames = ctx.video_processor.get_buffer_and_clear()
-                result = flush_and_process(frames)
-                if result:
-                    auto_result_placeholder.success("✅ Auto-saved on Stop")
-        st.session_state.was_playing = playing
+                last_roi = ctx.video_processor.get_last_roi()
+                if last_roi is not None:
+                    st.image(last_roi, caption="Captured ROI Frame", width=200)
+                    st.success("✅ Frame captured!")
+                else:
+                    st.warning("No face detected in current frame")
 
-# -----------------------------
-# History tab
-# -----------------------------
+# ========================================
+# HISTORY TAB
+# ========================================
 with tab_history:
     st.caption("Saved transcripts are stored here:")
     st.write(f"SQLite DB: {DB_PATH}")
@@ -434,11 +681,11 @@ with tab_history:
         try:
             import pandas as pd
             df = pd.read_sql_query(
-                "SELECT id, datetime(ts, 'unixepoch') AS time, source, text_en, text_trans, tgt_lang, audio_path, video_path "
+                "SELECT id, datetime(ts + 19800, 'unixepoch') AS time, source, text_en, text_trans, tgt_lang "
                 "FROM history ORDER BY id DESC LIMIT 20", con)
         except Exception:
             cur = con.cursor()
-            cur.execute("SELECT id, ts, source, text_en, text_trans, tgt_lang, audio_path, video_path FROM history ORDER BY id DESC LIMIT 20")
+            cur.execute("SELECT id, ts, source, text_en, text_trans, tgt_lang FROM history ORDER BY id DESC LIMIT 20")
             rows = cur.fetchall()
             if rows:
                 st.write("Recent entries:")
@@ -451,4 +698,4 @@ with tab_history:
     except Exception as e:
         st.warning(f"Could not read history: {e}")
 
-st.caption("Tip: After editing this file, restart Streamlit or use the sidebar Reload model to clear caches.")
+st.caption("💡 Tip: Use Debug Mode to diagnose ROI extraction issues | FPS counter shows real-time performance")

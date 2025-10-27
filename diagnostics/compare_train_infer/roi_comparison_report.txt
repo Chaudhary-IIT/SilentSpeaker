@@ -1,0 +1,2 @@
+Video index: 0, Mean pixel difference: 39.54
+[WARNING] ROI mismatch detected! (BBox / alignment / preprocessing may differ)

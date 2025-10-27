@@ -2,7 +2,7 @@
 import csv, cv2, numpy as np, torch
 from torch.utils.data import Dataset
 import mediapipe as mp
-from vocab import text_to_int, build_vocab
+from scripts.vocab import text_to_int, build_vocab
 
 # Control the time dimension so CTC has enough steps to spell words.
 MIN_T = 64     # minimum frames after preprocessing

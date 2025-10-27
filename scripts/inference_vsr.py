@@ -4,8 +4,9 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import mediapipe as mp
-from model_vsr import CNN3D_BiGRU
-from vocab import load_vocab, int_to_text
+from scripts.model_vsr import CNN3D_BiGRU
+from scripts.vocab import load_vocab, int_to_text
+
 
 
 # ==================== ROI Extraction ====================

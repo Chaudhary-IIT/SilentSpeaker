@@ -1,4 +1,4 @@
-# models.py (drop-in replacement)
+# models.py (Enhanced with character-level confidence tracking)
 import cv2, numpy as np, math
 from pathlib import Path
 
@@ -29,38 +29,94 @@ class LipReaderModel:
         self.torch = None
         self.F = None
         self.decoder = None
+        self.load_error = None
 
+        print(f"[SilentSpeaker] Attempting to load checkpoint from: {self.ckpt_path}")
+        print(f"[SilentSpeaker] Checkpoint exists: {self.ckpt_path.exists()}")
+        
         try:
-            import torch, torch.nn.functional as F
+            import torch
+            import torch.nn.functional as F
             self.torch, self.F = torch, F
-            if self.ckpt_path.exists():
-                ckpt = torch.load(str(self.ckpt_path), map_location=device)
-                if isinstance(ckpt, dict) and "idx2char" in ckpt:
-                    self.idx2char = ckpt["idx2char"]
-                if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                    from scripts.model_vsr import CNN3D_BiGRU
-                    self.model = CNN3D_BiGRU(vocab_size=len(self.idx2char))
-                    self.model.load_state_dict(ckpt["state_dict"], strict=False)
-                else:
-                    self.model = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
-                self.model.to(self.device).eval()
-                if self.use_beam:
-                    try:
-                        from torchaudio.models.decoder import CTCDecoder
-                        self.decoder = CTCDecoder(
-                            lexicon=None, tokens=self.idx2char, lm=None, nbest=1, beam_size=10, blank_token=self.idx2char[0]
-                        )
-                    except Exception:
-                        self.decoder = None
-                print(f"[SilentSpeaker] Loaded checkpoint: {self.ckpt_path}")
-            else:
+            print(f"[SilentSpeaker] ✅ PyTorch imported successfully")
+            
+            if not self.ckpt_path.exists():
                 self.demo_mode = True
-                print(f"[SilentSpeaker] Checkpoint not found, demo_mode=True: {self.ckpt_path}")
+                self.load_error = f"Checkpoint not found at: {self.ckpt_path}"
+                print(f"[SilentSpeaker] ❌ {self.load_error}")
+                return
+            
+            print(f"[SilentSpeaker] Loading checkpoint file...")
+            ckpt = torch.load(str(self.ckpt_path), map_location=device)
+            print(f"[SilentSpeaker] ✅ Checkpoint loaded. Type: {type(ckpt)}")
+            
+            if isinstance(ckpt, dict):
+                print(f"[SilentSpeaker] Checkpoint keys: {list(ckpt.keys())}")
+                
+                if "idx2char" in ckpt:
+                    self.idx2char = ckpt["idx2char"]
+                    print(f"[SilentSpeaker] ✅ Vocab loaded: {len(self.idx2char)} tokens")
+                
+                if "state_dict" in ckpt:
+                    print(f"[SilentSpeaker] Loading model from state_dict...")
+                    try:
+                        from scripts.model_vsr import CNN3D_BiGRU
+                        print(f"[SilentSpeaker] ✅ CNN3D_BiGRU imported")
+                        self.model = CNN3D_BiGRU(vocab_size=len(self.idx2char))
+                        self.model.load_state_dict(ckpt["state_dict"], strict=False)
+                        print(f"[SilentSpeaker] ✅ Model state_dict loaded")
+                    except ImportError as e:
+                        self.demo_mode = True
+                        self.load_error = f"Failed to import CNN3D_BiGRU: {e}"
+                        print(f"[SilentSpeaker] ❌ {self.load_error}")
+                        return
+                    except Exception as e:
+                        self.demo_mode = True
+                        self.load_error = f"Failed to load state_dict: {e}"
+                        print(f"[SilentSpeaker] ❌ {self.load_error}")
+                        return
+                else:
+                    print(f"[SilentSpeaker] Warning: 'state_dict' key not found, trying direct model load")
+                    self.model = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
+            else:
+                print(f"[SilentSpeaker] Checkpoint is model object directly")
+                self.model = ckpt
+            
+            if self.model is None:
+                self.demo_mode = True
+                self.load_error = "Model is None after loading checkpoint"
+                print(f"[SilentSpeaker] ❌ {self.load_error}")
+                return
+            
+            self.model.to(self.device).eval()
+            print(f"[SilentSpeaker] ✅ Model moved to {self.device} and set to eval mode")
+            
+            if self.use_beam:
+                try:
+                    from torchaudio.models.decoder import CTCDecoder
+                    self.decoder = CTCDecoder(
+                        lexicon=None, tokens=self.idx2char, lm=None, nbest=1, 
+                        beam_size=10, blank_token=self.idx2char[0]
+                    )
+                    print(f"[SilentSpeaker] ✅ Beam search decoder initialized")
+                except Exception as e:
+                    print(f"[SilentSpeaker] ⚠️ Beam search not available: {e}")
+                    self.decoder = None
+            
+            print(f"[SilentSpeaker] ✅✅✅ Model loaded successfully! demo_mode={self.demo_mode}")
+            
+        except ImportError as e:
+            self.demo_mode = True
+            self.load_error = f"PyTorch import failed: {e}"
+            print(f"[SilentSpeaker] ❌ {self.load_error}")
         except Exception as e:
             self.demo_mode = True
-            print(f"[SilentSpeaker] Model load error, demo_mode=True: {e}")
+            self.load_error = f"Unexpected error during model load: {e}"
+            print(f"[SilentSpeaker] ❌ {self.load_error}")
+            import traceback
+            traceback.print_exc()
 
-    # -------- Revised ROI helpers --------
+    # -------- ROI helpers --------
     def _face_bbox_from_landmarks(self, lms, w, h, pad_rel=0.08):
         xs = [int(lm.x * w) for lm in lms.landmark]
         ys = [int(lm.y * h) for lm in lms.landmark]
@@ -85,18 +141,14 @@ class LipReaderModel:
 
         cx = int(sum(xs) / len(xs))
         cy = int(sum(ys) / len(ys))
-
         lip_w = max(1.0, (max(xs) - min(xs)))
         face_bbox = self._face_bbox_from_landmarks(lms, w, h)
         face_w = float(face_bbox[2] - face_bbox[0])
-
-        size = int(max(lip_w * 2.6, face_w * 0.28))
+        size = int(max(lip_w * 2.8, face_w * 0.38))
         size = int(size * float(scale))
         half = max(8, size // 2)
-
         x1, y1 = cx - half, cy - half
         x2, y2 = cx + half, cy + half
-
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
         return [x1, y1, x2, y2]
@@ -109,14 +161,8 @@ class LipReaderModel:
         sm = [int(round(a * bbox[i] + (1 - a) * self.prev_bbox[i])) for i in range(4)]
         self.prev_bbox = sm
         return sm
-    # ------------------------------------
 
-    # -------- Time fitting helper --------
     def _fit_time_axis_local(self, frames, min_t=64, max_t=96):
-        """
-        frames: list or array of [H,W] in [0,1] float32
-        returns np.array shaped [T,H,W] with T in [min_t, max_t]
-        """
         if isinstance(frames, list):
             if len(frames) == 0:
                 return np.zeros((min_t, self.roi_size[0], self.roi_size[1]), dtype=np.float32)
@@ -133,7 +179,6 @@ class LipReaderModel:
             idx = np.linspace(0, T0 - 1, num=max_t).round().astype(int)
             arr = arr[idx]
         return arr
-    # -------------------------------------
 
     def _extract_mouth_roi(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
@@ -144,11 +189,9 @@ class LipReaderModel:
         lms = res.multi_face_landmarks[0]
 
         x1, y1, x2, y2 = self._mouth_center_square(lms, w, h, scale=1.0)
-
         pad_px = max(2, int(min(w, h) * 0.03))
         x1, y1 = max(0, x1 - pad_px), max(0, y1 - pad_px)
         x2, y2 = min(w, x2 + pad_px), min(h, y2 + pad_px)
-
         x1, y1, x2, y2 = self._smooth_bbox([x1, y1, x2, y2])
 
         crop = frame_bgr[y1:y2, x1:x2]
@@ -167,7 +210,8 @@ class LipReaderModel:
         resized = resized / 255.0
         return resized.astype(np.float32)
 
-    def _ctc_greedy(self, logits):
+    def _ctc_greedy_with_char_conf(self, logits):
+        """Returns text, overall_conf, and list of (char, conf) tuples"""
         torch, F = self.torch, self.F
         if logits.dim() == 3:
             logits = logits[0]
@@ -175,15 +219,28 @@ class LipReaderModel:
         maxp, pred = probs.max(dim=-1)
         prev = None
         chars, confs = [], []
+        char_confs = []  # (char, confidence) pairs
+        
         for t, p in enumerate(pred.tolist()):
             if p == 0 or p == prev:
                 prev = p
                 continue
             idx = p if p < len(self.idx2char) else 0
-            chars.append(self.idx2char[idx])
-            confs.append(float(maxp[t].item()))
+            char = self.idx2char[idx]
+            conf_val = float(maxp[t].item())
+            chars.append(char)
+            confs.append(conf_val)
+            char_confs.append((char, conf_val))
             prev = p
-        return "".join(chars), (sum(confs) / len(confs) if confs else 0.0)
+        
+        text = "".join(chars)
+        overall_conf = sum(confs) / len(confs) if confs else 0.0
+        return text, overall_conf, char_confs
+
+    def _ctc_greedy(self, logits):
+        """Standard greedy decode without char-level confidence"""
+        text, conf, _ = self._ctc_greedy_with_char_conf(logits)
+        return text, conf
 
     def _ctc_beam(self, logits):
         if self.decoder is None:
@@ -199,10 +256,10 @@ class LipReaderModel:
         return (text or gtext), conf
 
     def predict(self, video_path):
+        """Standard prediction without debug data"""
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"[SilentSpeaker] Could not open video: {video_path}")
-            return {"text": "", "conf": 0.0}
+            return {"text": "", "conf": 0.0, "char_confidences": []}
         rois = []
         self.prev_bbox = None
         while True:
@@ -213,20 +270,164 @@ class LipReaderModel:
             if roi is not None:
                 rois.append(roi)
         cap.release()
+        
         if not rois:
-            return {"text": "", "conf": 0.0}
+            return {"text": "", "conf": 0.0, "char_confidences": []}
+        
         if self.demo_mode or self.model is None:
-            return {"text": "Predicted text from AI model", "conf": 0.0}
+            return {"text": "Predicted text from AI model", "conf": 0.0, "char_confidences": []}
 
-        # Fit time axis then prepare tensor
-        x = self._fit_time_axis_local(rois)                      # (T,H,W) with T in [64,96]
-        x = np.expand_dims(x, 1).astype(np.float32)              # (T,1,H,W)
-        xt = self.torch.from_numpy(x).unsqueeze(0).to(self.device)  # (1,T,1,H,W)
+        x = self._fit_time_axis_local(rois)
+        x = np.expand_dims(x, 1).astype(np.float32)
+        xt = self.torch.from_numpy(x).unsqueeze(0).to(self.device)
 
         with self.torch.no_grad():
-            logits = self.model(xt)                              # (B,T,V)
+            logits = self.model(xt)
+        
         if self.use_beam:
             text, conf = self._ctc_beam(logits)
+            char_confs = []
         else:
-            text, conf = self._ctc_greedy(logits)
-        return {"text": text, "conf": round(float(conf), 3)}
+            text, conf, char_confs = self._ctc_greedy_with_char_conf(logits)
+        
+        if conf < 0.15:
+            return {
+                "text": "[Low confidence - unclear speech]", 
+                "conf": round(float(conf), 3),
+                "char_confidences": char_confs
+            }
+        
+        return {
+            "text": text, 
+            "conf": round(float(conf), 3),
+            "char_confidences": char_confs
+        }
+
+    def predict_with_debug(self, video_path):
+        """Enhanced prediction with full debug data"""
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {
+                "text": "", "conf": 0.0, "roi_frames": [], "annotated_frames": [],
+                "bboxes": [], "debug_info": {}, "char_confidences": []
+            }
+        
+        rois = []
+        bboxes = []
+        annotated_frames = []
+        self.prev_bbox = None
+        frame_count = 0
+        detected_count = 0
+        
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_count += 1
+            
+            h, w = frame.shape[:2]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = self.face_mesh.process(rgb)
+            
+            if res.multi_face_landmarks:
+                detected_count += 1
+                lms = res.multi_face_landmarks[0]
+                
+                x1, y1, x2, y2 = self._mouth_center_square(lms, w, h, scale=1.0)
+                pad_px = max(2, int(min(w, h) * 0.03))
+                x1, y1 = max(0, x1 - pad_px), max(0, y1 - pad_px)
+                x2, y2 = min(w, x2 + pad_px), min(h, y2 + pad_px)
+                x1, y1, x2, y2 = self._smooth_bbox([x1, y1, x2, y2])
+                
+                bboxes.append((x1, y1, x2, y2))
+                
+                annotated = frame.copy()
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(annotated, f"Frame {frame_count}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(annotated, f"ROI: {x2-x1}x{y2-y1}", (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                annotated_frames.append(annotated)
+                
+                crop = frame[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, self.roi_size, interpolation=cv2.INTER_AREA)
+                
+                try:
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    resized = clahe.apply(resized.astype('uint8')).astype('float32')
+                except Exception:
+                    resized = resized.astype('float32')
+                
+                resized = resized / 255.0
+                rois.append(resized.astype(np.float32))
+        
+        cap.release()
+        
+        debug_info = {
+            "total_frames": frame_count,
+            "detected_frames": detected_count,
+            "roi_count": len(rois),
+            "detection_rate": f"{detected_count/max(1,frame_count)*100:.1f}%"
+        }
+        
+        if not rois:
+            return {
+                "text": "[No face detected]", 
+                "conf": 0.0, 
+                "roi_frames": [], 
+                "annotated_frames": annotated_frames,
+                "bboxes": bboxes,
+                "debug_info": debug_info,
+                "logits_sample": [],
+                "char_confidences": []
+            }
+        
+        if self.demo_mode or self.model is None:
+            text = "Predicted text from AI model"
+            conf = 0.0
+            x_shape = (len(rois), self.roi_size[0], self.roi_size[1])
+            logits_shape = (1, len(rois), len(self.idx2char))
+            logits_sample = []
+            xt_shape = "N/A"
+            char_confs = []
+        else:
+            x = self._fit_time_axis_local(rois)
+            x_shape = x.shape
+            x = np.expand_dims(x, 1).astype(np.float32)
+            xt = self.torch.from_numpy(x).unsqueeze(0).to(self.device)
+            xt_shape = tuple(xt.shape)
+            
+            with self.torch.no_grad():
+                logits = self.model(xt)
+                logits_shape = tuple(logits.shape)
+                logits_sample = logits[0, :5, :].cpu().numpy().tolist()
+            
+            if self.use_beam:
+                text, conf = self._ctc_beam(logits)
+                char_confs = []
+            else:
+                text, conf, char_confs = self._ctc_greedy_with_char_conf(logits)
+            
+            if conf < 0.15:
+                text = f"[Low confidence - unclear speech] (raw: {text})"
+        
+        debug_info.update({
+            "time_axis_after_fit": x_shape[0] if len(x_shape) > 0 else 0,
+            "model_input_shape": str(xt_shape),
+            "logits_shape": str(logits_shape)
+        })
+        
+        return {
+            "text": text,
+            "conf": round(float(conf), 3),
+            "roi_frames": rois,
+            "annotated_frames": annotated_frames,
+            "bboxes": bboxes,
+            "debug_info": debug_info,
+            "logits_sample": logits_sample,
+            "char_confidences": char_confs
+        }
